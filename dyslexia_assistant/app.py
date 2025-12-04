@@ -66,19 +66,28 @@ def corrective_hint(expected: str, actual: str) -> str:
 def analyze_attention(duration_seconds: int = 8) -> dict:
     """
     Face + eye detection → focus %, blink rate, rough gaze distribution.
-    On cloud (where cv2/webcam may not be available), we return neutral values.
+
+    If OpenCV or a webcam is not available (e.g. Streamlit Cloud), we return a
+    reasonable simulated attention profile instead of zeros.
     """
+    # Fallback / simulated values (used when webcam isn't available)
+    simulated = {
+        "focus": 80.0,
+        "blink_rate": 0.0,
+        "gaze_left": 10.0,
+        "gaze_center": 80.0,
+        "gaze_right": 10.0,
+        "used_webcam": False,
+    }
+
     if not CV2_AVAILABLE:
-        # Cloud-safe fallback: no webcam, return default engagement values
-        return {
-            "focus": 50.0,
-            "blink_rate": 0.0,
-            "gaze_left": 0.0,
-            "gaze_center": 50.0,
-            "gaze_right": 0.0,
-        }
+        return simulated
 
     cap = cv2.VideoCapture(0)
+
+    # If the environment has no camera (typical in Streamlit Cloud)
+    if not cap.isOpened():
+        return simulated
 
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -153,7 +162,9 @@ def analyze_attention(duration_seconds: int = 8) -> dict:
         "gaze_left": round(100 * left_ratio, 1),
         "gaze_center": round(100 * center_ratio, 1),
         "gaze_right": round(100 * right_ratio, 1),
+        "used_webcam": True,
     }
+
 
 
 def performance_index(pron: float, focus: float, speed_wps: float) -> float:
@@ -368,13 +379,7 @@ st.write(
 )
 
 if st.button("Run 8-second Attention Scan"):
-    if not CV2_AVAILABLE:
-        st.warning(
-            "Webcam-based focus tracking is not available in this cloud demo. "
-            "Run the app locally to use the full attention module."
-        )
-    else:
-        st.info("Scanning… please read aloud and look at the screen 👀")
+    st.info("Scanning… please read aloud and look at the screen 👀")
 
     att = analyze_attention()
     has_attention_scan = True
@@ -396,12 +401,17 @@ if st.button("Run 8-second Attention Scan"):
     with col5:
         st.metric("Looking right", f"{att['gaze_right']} %")
 
-    if att["focus"] < 60 or att["gaze_center"] < 50:
+    if not att.get("used_webcam", False):
         st.warning(
-            "Signs of distraction or fatigue detected. A short break may help 🙂"
+            "In this environment the attention numbers are simulated, because a webcam "
+            "is not accessible. On a local machine, the model will use real face and "
+            "eye-tracking signals."
         )
+    elif att["focus"] < 60 or att["gaze_center"] < 50:
+        st.warning("Signs of distraction or fatigue detected. A short break may help 🙂")
     else:
         st.success("You stayed well-engaged during this reading window. 🌟")
+
 
 # -------------------- STEP 3: ADAPT -------------------- #
 st.subheader("Step 3️⃣ Adapt – Dynamic Difficulty Engine")
