@@ -2,25 +2,30 @@ import streamlit as st
 import speech_recognition as sr
 import numpy as np
 import time
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+
+# ---------- Optional OpenCV (webcam may not be available in cloud) ----------
 try:
     import cv2
     CV2_AVAILABLE = True
 except Exception:
     CV2_AVAILABLE = False
 
-import pyttsx3
-import pandas as pd
-from pathlib import Path
-from datetime import datetime
+# ---------- Optional Text-to-Speech (pyttsx3 often fails in cloud) ----------
+try:
+    import pyttsx3
 
-# -------------------------------------------------
-# Global setup
-# -------------------------------------------------
-st.set_page_config(page_title="AI Dyslexia Reading Assistant", layout="wide")
-engine = pyttsx3.init()
+    engine = pyttsx3.init()
+    TTS_AVAILABLE = True
+except Exception:
+    engine = None
+    TTS_AVAILABLE = False
+
+# ---------- Data file for logging sessions ----------
 DATA_FILE = Path("reading_sessions.csv")
 
-LEVELS = ["Easy", "Medium", "Hard"]
 
 # -------------------------------------------------
 # Helper functions
@@ -58,33 +63,6 @@ def corrective_hint(expected: str, actual: str) -> str:
     return " ".join(msg_parts)
 
 
-def highlight_word_differences(expected: str, actual: str) -> str:
-    """
-    Show word-level feedback:
-    - correct words in green
-    - missed words in red with underline
-    """
-    expected_words = expected.split()
-    actual_words = actual.split()
-
-    actual_lower = [w.lower() for w in actual_words]
-
-    html_chunks = []
-    for w in expected_words:
-        if w.lower() in actual_lower:
-            # correct / present
-            html_chunks.append(
-                f"<span style='color:#2ecc71; font-weight:600; margin-right:4px;'>{w}</span>"
-            )
-        else:
-            # missed / mispronounced
-            html_chunks.append(
-                f"<span style='color:#e74c3c; text-decoration:underline; margin-right:4px;'>{w}</span>"
-            )
-
-    return "<div style='font-size:18px; line-height:1.8;'>" + " ".join(html_chunks) + "</div>"
-
-
 def analyze_attention(duration_seconds: int = 8) -> dict:
     """
     Face + eye detection → focus %, blink rate, rough gaze distribution.
@@ -101,7 +79,6 @@ def analyze_attention(duration_seconds: int = 8) -> dict:
         }
 
     cap = cv2.VideoCapture(0)
-    ...
 
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -133,7 +110,7 @@ def analyze_attention(duration_seconds: int = 8) -> dict:
 
         focused_frames += 1
         (x, y, w, h) = faces[0]
-        roi_gray = gray[y:y + h, x:x + w]
+        roi_gray = gray[y : y + h, x : x + w]
 
         eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 3)
         eyes_visible = len(eyes) > 0
@@ -181,7 +158,8 @@ def analyze_attention(duration_seconds: int = 8) -> dict:
 
 def performance_index(pron: float, focus: float, speed_wps: float) -> float:
     """
-    Simple regression-style score combining pronunciation, focus, and reading speed.
+    Simple ML-style regression score combining pronunciation, focus, and reading speed.
+    This is our 'model output' used to adapt difficulty.
     """
     speed_score = min(speed_wps * 20, 100)  # rough 0–100 scaling
     idx = 0.5 * pron + 0.3 * focus + 0.2 * speed_score
@@ -198,9 +176,8 @@ def engagement_score(pron: float, focus: float, speed_wps: float) -> float:
     return round(score, 1)
 
 
-def rule_based_next_level(perf_idx: float, current_level: str = "Medium") -> str:
-    """Original threshold-based suggestion (fallback if not enough data)."""
-    levels = LEVELS
+def suggest_next_level(perf_idx: float, current_level: str = "Medium") -> str:
+    levels = ["Easy", "Medium", "Hard"]
     i = levels.index(current_level)
     if perf_idx > 85 and i < 2:
         i += 1
@@ -209,50 +186,19 @@ def rule_based_next_level(perf_idx: float, current_level: str = "Medium") -> str
     return levels[i]
 
 
-def learned_next_level(
-    pron: float, focus: float, speed_wps: float, current_level: str, history: pd.DataFrame
-) -> str:
-    """
-    ML-style difficulty suggestion that uses historical engagement by level.
-    Target is to keep engagement around ~80.
-    """
-    if history is None or history.empty or "engagement" not in history.columns:
-        return rule_based_next_level(performance_index(pron, focus, speed_wps), current_level)
-
-    if len(history) < 5:
-        # not enough data to "learn" – use rule-based
-        return rule_based_next_level(performance_index(pron, focus, speed_wps), current_level)
-
-    current_eng = engagement_score(pron, focus, speed_wps)
-    target = 80.0
-
-    # average engagement per level from history
-    level_means = history.groupby("level_used")["engagement"].mean()
-
-    best_level = current_level
-    best_diff = float("inf")
-
-    for lvl in LEVELS:
-        expected = level_means.get(lvl, current_eng)  # if no past data for that level
-        diff = abs(expected - target)
-
-        # do not jump more than one step at a time
-        if abs(LEVELS.index(lvl) - LEVELS.index(current_level)) > 1:
-            continue
-
-        if diff < best_diff:
-            best_diff = diff
-            best_level = lvl
-
-    return best_level
-
-
 def text_to_speech(text: str):
+    if not TTS_AVAILABLE:
+        st.warning(
+            "Text-to-speech audio isn’t available in this cloud demo. "
+            "For spoken audio, please run the app locally."
+        )
+        return
+
     engine.say(text)
     engine.runAndWait()
 
 
-def highlight_syllables(text: str, font_size: int = 22, line_height: float = 1.6) -> str:
+def highlight_syllables(text: str) -> str:
     """Naive syllable-style highlighting using alternating colours."""
     vowels = "aeiouAEIOU"
     chunks = []
@@ -267,93 +213,53 @@ def highlight_syllables(text: str, font_size: int = 22, line_height: float = 1.6
         chunks.append(current)
 
     colors = ["#ffeaa7", "#fab1a0"]
-    spans = ""
+    html = ""
     for i, chunk in enumerate(chunks):
         color = colors[i % len(colors)]
-        spans += (
+        html += (
             f"<span style='background-color:{color}; padding:2px 4px; "
             f"border-radius:4px; margin-right:2px;'>{chunk}</span>"
         )
-    wrapper = (
-        f"<div style='font-size:{font_size}px; line-height:{line_height};'>"
-        f"{spans}</div>"
-    )
-    return wrapper
+    return html
 
 
-def mentor_message(
-    pron, focus, blink_rate, perf_idx, engagement, trend, persona: str
-) -> str:
-    """Generate adaptive mentor feedback based on metrics + persona style."""
-
-    improving = trend == "up"
-    declining = trend == "down"
+def mentor_message(pron, focus, blink_rate, perf_idx, persona: str) -> str:
+    base = ""
 
     if persona == "Friendly Buddy":
-        if improving:
-            return (
-                "🌟 You're on a roll! Your reading is getting better each time. "
-                "Let's keep this streak and try a fun, slightly harder sentence next. "
-            )
-        if declining:
-            return (
-                "I can see today is a bit tougher, and that's totally okay. "
-                "Let's take a small break, breathe, and then we’ll read it together again 😊"
-            )
-        if pron > 85 and focus > 80:
-            return (
-                "Amazing job! You stayed focused and your pronunciation was super clear. "
-                "I'm really proud of you! 💚"
-            )
-        if focus < 60 or blink_rate > 25:
-            return (
-                "Looks like your eyes are getting tired. How about a quick stretch "
-                "and some water before we try again? 🧃"
-            )
-        return "Nice effort! Every try makes you stronger at reading. 💪"
+        base = "Hey, great effort today! "
+    elif persona == "Calm Coach":
+        base = "You're making steady, thoughtful progress. "
+    else:  # Motivational Trainer
+        base = "Awesome grind! You're pushing yourself really well. "
 
-    if persona == "Supportive Coach":
-        if improving:
-            return (
-                "Great progress – your engagement trend is going up. "
-                "We can safely increase the challenge a bit while keeping you supported. 🏅"
-            )
-        if declining:
-            return (
-                "Your recent sessions show a drop in engagement. "
-                "Let's temporarily lower difficulty, focus on accuracy, and rebuild confidence."
-            )
-        if perf_idx > 85:
-            return (
-                "You mastered this level. I recommend moving to the next difficulty tier "
-                "to keep your brain positively challenged."
-            )
-        if pron < 60:
-            return (
-                "Many words were tricky this time. We'll slow down, repeat key words, "
-                "and use text-to-speech to model the pronunciation."
-            )
-        return "Solid performance. Maintain this level for a few more attempts, then we’ll reassess."
-
-    # Calm Guide
-    if improving:
-        return (
-            "Your scores show gentle improvement over time. "
-            "You are moving in the right direction – steady and calm. 🌱"
-        )
-    if declining:
-        return (
-            "Your recent engagement is slightly lower. "
-            "Let's not worry – we can take things slowly and focus on one short sentence at a time."
-        )
     if pron > 85 and focus > 80:
         return (
-            "You read this sentence with clarity and attention. "
-            "We can softly transition to more complex sentences when you feel ready."
+            base
+            + "Your pronunciation and attention are both strong. "
+            "We can safely try slightly harder sentences next. 💪"
+        )
+    if focus < 60 and blink_rate > 25:
+        return (
+            base
+            + "I noticed lots of blinking and low focus – maybe you're tired. "
+            "Let's take a short break and then come back refreshed 😊"
+        )
+    if pron < 60:
+        return (
+            base
+            + "Some words were tricky this time. Let's slow down and listen to the "
+            "sentence again, then try reading it in smaller chunks."
+        )
+    if perf_idx > 80:
+        return (
+            base
+            + "Overall performance is high – you're ready for more challenging "
+            "reading tasks. Keep going! ⭐"
         )
     return (
-        "Thank you for your effort. With a bit more practice on the highlighted words "
-        "and relaxed breathing, your reading will feel smoother."
+        base
+        + "Nice work! With a bit more practice, your reading will feel even smoother."
     )
 
 
@@ -370,11 +276,7 @@ def load_history() -> pd.DataFrame:
                 "level_used",
             ]
         )
-    df = pd.read_csv(DATA_FILE)
-    # ensure engagement column exists for older files
-    if "engagement" not in df.columns:
-        df["engagement"] = np.nan
-    return df
+    return pd.read_csv(DATA_FILE)
 
 
 def save_session(row: dict):
@@ -383,30 +285,24 @@ def save_session(row: dict):
     df.to_csv(DATA_FILE, index=False)
 
 
-def engagement_trend(history: pd.DataFrame) -> str:
-    """Return 'up', 'down', or 'flat' based on last few engagement scores."""
-    if history is None or history.empty or "engagement" not in history.columns:
-        return "flat"
-    recent = history["engagement"].dropna().tail(5)
-    if len(recent) < 3:
-        return "flat"
-    first = recent.iloc[0]
-    last = recent.iloc[-1]
-    if last - first > 5:
-        return "up"
-    if first - last > 5:
-        return "down"
-    return "flat"
-
-
 # -------------------------------------------------
-# UI
+# UI Setup
 # -------------------------------------------------
+st.set_page_config(
+    page_title="AI Dyslexia Reading Assistant",
+    layout="wide",
+)
+
+# Sidebar: mentor persona
+persona_style = st.sidebar.selectbox(
+    "Mentor persona style",
+    ["Friendly Buddy", "Calm Coach", "Motivational Trainer"],
+)
+
 st.title("📚 AI Reading Assistant for Dyslexic Learners")
 
 recognizer = sr.Recognizer()
 history = load_history()
-prev_session = history.tail(1) if not history.empty else pd.DataFrame()
 
 audio_score = 0.0
 reading_speed_wps = 1.0
@@ -415,12 +311,6 @@ blink_rate = 0.0
 perf_idx = 0.0
 engagement = 0.0
 has_attention_scan = False
-
-# Mentor persona selection
-persona = st.sidebar.selectbox(
-    "Mentor persona style",
-    ["Friendly Buddy", "Supportive Coach", "Calm Guide"],
-)
 
 # -------------------- STEP 1: LISTEN -------------------- #
 st.subheader("Step 1️⃣ Listen – Speech Analysis")
@@ -456,12 +346,6 @@ if uploaded_audio:
             st.caption("Instant corrective hint:")
             st.info(hint)
 
-            st.markdown("**Word-by-word feedback:**", unsafe_allow_html=True)
-            st.markdown(
-                highlight_word_differences(expected_text, actual_text),
-                unsafe_allow_html=True,
-            )
-
             if audio_score > 85:
                 st.success("Excellent reading! ⭐")
             elif audio_score > 50:
@@ -487,10 +371,11 @@ if st.button("Run 8-second Attention Scan"):
     if not CV2_AVAILABLE:
         st.warning(
             "Webcam-based focus tracking is not available in this cloud demo. "
-            "Please run the app locally to use the full attention module."
+            "Run the app locally to use the full attention module."
         )
     else:
         st.info("Scanning… please read aloud and look at the screen 👀")
+
     att = analyze_attention()
     has_attention_scan = True
 
@@ -537,36 +422,25 @@ current_level_default = "Medium"
 if not history.empty:
     current_level_default = history.iloc[-1]["level_used"]
 
-# ML-powered suggestion
-ml_suggested = learned_next_level(
-    audio_score, effective_focus, reading_speed_wps, current_level_default, history
-)
+suggested_level = suggest_next_level(perf_idx, current_level_default)
 
 levels = list(sentences.keys())
 selected_level = st.selectbox(
-    "Difficulty level (ML suggestion can be overridden by teacher):",
+    "Difficulty level (system suggestion can be overridden by teacher):",
     levels,
-    index=levels.index(ml_suggested),
+    index=levels.index(suggested_level),
 )
 st.caption(
-    f"Rule-based index = {perf_idx} → ML-suggested level based on past engagement: "
-    f"**{ml_suggested}**."
+    f"System suggestion based on learned performance index {perf_idx}: "
+    f"**{suggested_level}** level."
 )
-
-# Multisensory controls
-st.write("📖 Read this sentence (multisensory support enabled):")
-font_size = st.slider("Font size", min_value=18, max_value=36, value=22, step=1)
-line_height = st.slider("Line spacing", min_value=1.2, max_value=2.0, value=1.6, step=0.1)
 
 current_sentence = sentences[selected_level]
-st.markdown(
-    highlight_syllables(current_sentence, font_size=font_size, line_height=line_height),
-    unsafe_allow_html=True,
-)
 
-st.caption(
-    f"Sentence length: {len(current_sentence.split())} words, "
-    f"approx. {len(current_sentence)//3 + 1} syllable groups."
+st.write("📖 Read this sentence (multisensory support enabled):")
+st.markdown(
+    f"<div style='font-size:22px; line-height:1.6;'>{highlight_syllables(current_sentence)}</div>",
+    unsafe_allow_html=True,
 )
 
 # -------------------- STEP 4: ASSIST -------------------- #
@@ -583,14 +457,12 @@ with col_b:
     )
 
 st.caption(
-    "Instant support: colour cues + speech model help the learner match what they "
-    "see with what they hear, ideal for dyslexic readers."
+    "Instant support: use both the colour highlights and the audio model to practise "
+    "matching what you *see* with what you *hear*."
 )
 
 # -------------------- STEP 5: MENTOR -------------------- #
 st.subheader("Step 5️⃣ Mentor – AI Persona & Motivational Feedback")
-
-trend = engagement_trend(history)
 
 if audio_score > 0:
     if not has_attention_scan:
@@ -599,34 +471,8 @@ if audio_score > 0:
             "while you are reading the sentence."
         )
 
-    msg = mentor_message(
-        audio_score, effective_focus, blink_rate, perf_idx, engagement, trend, persona
-    )
+    msg = mentor_message(audio_score, effective_focus, blink_rate, perf_idx, persona_style)
     st.success(msg)
-
-    # Short session summary compared to previous session
-    if not prev_session.empty:
-        prev_pron = float(prev_session["pron_score"].iloc[0])
-        prev_eng = float(prev_session["engagement"].iloc[0]) if not np.isnan(prev_session["engagement"].iloc[0]) else engagement
-        delta_pron = round(audio_score - prev_pron, 1)
-        delta_eng = round(engagement - prev_eng, 1)
-
-        summary_lines = []
-
-        if abs(delta_pron) >= 1:
-            if delta_pron > 0:
-                summary_lines.append(f"✅ Pronunciation improved by {delta_pron} points since last session.")
-            else:
-                summary_lines.append(f"ℹ️ Pronunciation dropped by {abs(delta_pron)} points; we’ll reinforce tricky words.")
-
-        if abs(delta_eng) >= 1:
-            if delta_eng > 0:
-                summary_lines.append(f"✅ Engagement increased by {delta_eng} points – great focus!")
-            else:
-                summary_lines.append(f"ℹ️ Engagement decreased by {abs(delta_eng)} points; maybe take a short break.")
-
-        if summary_lines:
-            st.caption("Session summary:\n- " + "\n- ".join(summary_lines))
 
     # log the session so the 'model' can learn over time
     save_session(
