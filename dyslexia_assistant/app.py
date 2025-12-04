@@ -1,8 +1,13 @@
 import streamlit as st
 import speech_recognition as sr
 import numpy as np
-import cv2
 import time
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except Exception:
+    CV2_AVAILABLE = False
+
 import pyttsx3
 import pandas as pd
 from pathlib import Path
