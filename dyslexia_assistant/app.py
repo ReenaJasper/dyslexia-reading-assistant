@@ -86,8 +86,22 @@ def highlight_word_differences(expected: str, actual: str) -> str:
 
 
 def analyze_attention(duration_seconds: int = 8) -> dict:
-    """Face + eye detection → focus %, blink rate, rough gaze distribution."""
+    """
+    Face + eye detection → focus %, blink rate, rough gaze distribution.
+    On cloud (where cv2/webcam may not be available), we return neutral values.
+    """
+    if not CV2_AVAILABLE:
+        # Cloud-safe fallback: no webcam, return default engagement values
+        return {
+            "focus": 50.0,
+            "blink_rate": 0.0,
+            "gaze_left": 0.0,
+            "gaze_center": 50.0,
+            "gaze_right": 0.0,
+        }
+
     cap = cv2.VideoCapture(0)
+    ...
 
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -470,7 +484,13 @@ st.write(
 )
 
 if st.button("Run 8-second Attention Scan"):
-    st.info("Scanning… please read aloud and look at the screen 👀")
+    if not CV2_AVAILABLE:
+        st.warning(
+            "Webcam-based focus tracking is not available in this cloud demo. "
+            "Please run the app locally to use the full attention module."
+        )
+    else:
+        st.info("Scanning… please read aloud and look at the screen 👀")
     att = analyze_attention()
     has_attention_scan = True
 
