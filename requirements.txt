@@ -1,7 +1,1 @@
-streamlit
-speechrecognition
-opencv-python-headless
-numpy
-pandas
-pillow
-pyttsx3
+
