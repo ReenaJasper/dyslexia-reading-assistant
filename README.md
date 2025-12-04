@@ -12,3 +12,6 @@ A personalized mentor persona plays a crucial role in supporting motivation and 
 
 Overall, this project demonstrates a practical yet impactful integration of speech technology, computer vision, behavioral analytics, and adaptive learning techniques to create an inclusive educational tool. By combining real-time assessment with emotional intelligence and motivational support, the AI Dyslexia Reading Assistant promotes better learning outcomes and helps dyslexic students build confidence in their reading skills at their own pace.
 
+Deployment link - https://dyslexia-reading-assistant-8exart8rminzrrzayw7de5.streamlit.app/
+
+
